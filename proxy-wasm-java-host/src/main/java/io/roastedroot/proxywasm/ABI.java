@@ -1,6 +1,7 @@
 package io.roastedroot.proxywasm;
 
 import static io.roastedroot.proxywasm.Helpers.bytes;
+import static io.roastedroot.proxywasm.Helpers.len;
 import static io.roastedroot.proxywasm.Helpers.replaceBytes;
 import static io.roastedroot.proxywasm.Helpers.split;
 import static io.roastedroot.proxywasm.Helpers.string;
@@ -480,14 +481,18 @@ class ABI {
      *
      * @param bufferType       The type of buffer to get
      * @param start            The start index in the buffer
-     * @param length           The number of bytes to get
+     * @param chunkLength           The number of bytes to get
      * @param returnBufferData Pointer to where the buffer data address should be stored
      * @param returnBufferSize Pointer to where the buffer size should be stored
      * @return WasmResult status code
      */
     @WasmExport
     int proxyGetBufferBytes(
-            int bufferType, int start, int length, int returnBufferData, int returnBufferSize) {
+            int bufferType,
+            int start,
+            int chunkLength,
+            int returnBufferData,
+            int returnBufferSize) {
 
         try {
             // Get the buffer based on the buffer type
@@ -496,29 +501,34 @@ class ABI {
                 return WasmResult.NOT_FOUND.getValue();
             }
 
-            if (start > start + length) {
+            if (start < 0) {
                 return WasmResult.BAD_ARGUMENT.getValue();
             }
 
+            int maxChunkLength = b.length - start;
+            if (chunkLength < 0 || chunkLength > maxChunkLength) {
+                chunkLength = maxChunkLength;
+            }
+
             ByteBuffer buffer = ByteBuffer.wrap(b);
-            if (start + length > buffer.capacity()) {
-                length = buffer.capacity() - start;
+            if (start + chunkLength > buffer.capacity()) {
+                chunkLength = buffer.capacity() - start;
             }
 
             try {
                 buffer.position(start);
-                buffer.limit(start + length);
+                buffer.limit(start + chunkLength);
             } catch (IllegalArgumentException e) {
                 return WasmResult.BAD_ARGUMENT.getValue();
             }
 
             // Allocate memory in the WebAssembly instance
-            int addr = malloc(length);
+            int addr = malloc(chunkLength);
             putMemory(addr, buffer);
             // Write the address to the return pointer
             putUint32(returnBufferData, addr);
             // Write the length to the return size pointer
-            putUint32(returnBufferSize, length);
+            putUint32(returnBufferSize, chunkLength);
             return WasmResult.OK.getValue();
 
         } catch (WasmException e) {
@@ -713,62 +723,7 @@ class ABI {
                 return WasmResult.NOT_FOUND.getValue();
             }
 
-            // to clone the headers so that they don't change on while we process them in the loop
-            var cloneMap = new ArrayProxyMap(header);
-            int totalBytesLen = U32_LEN; // Start with space for the count
-
-            for (Map.Entry<String, String> entry : cloneMap.entries()) {
-                String key = entry.getKey();
-                String value = entry.getValue();
-                totalBytesLen += U32_LEN + U32_LEN; // keyLen + valueLen
-                totalBytesLen += key.length() + 1 + value.length() + 1; // key + \0 + value + \0
-            }
-
-            // Allocate memory in the WebAssembly instance
-            int addr = malloc(totalBytesLen);
-
-            // Write the number of entries to the allocated memory
-            putUint32(addr, cloneMap.size());
-
-            // Calculate pointers for lengths and data
-            int lenPtr = addr + U32_LEN;
-            int dataPtr = lenPtr + ((U32_LEN + U32_LEN) * cloneMap.size());
-
-            // Write each key-value pair to memory
-            for (Map.Entry<String, String> entry : cloneMap.entries()) {
-                String key = entry.getKey();
-                String value = entry.getValue();
-
-                // Write key length
-                putUint32(lenPtr, key.length());
-                lenPtr += U32_LEN;
-
-                // Write value length
-                putUint32(lenPtr, value.length());
-                lenPtr += U32_LEN;
-
-                // Write key bytes
-                putMemory(dataPtr, key.getBytes());
-                dataPtr += key.length();
-
-                // Write null terminator for key
-                putByte(dataPtr, (byte) 0);
-                dataPtr++;
-
-                // Write value bytes
-                putMemory(dataPtr, value.getBytes());
-                dataPtr += value.length();
-
-                // Write null terminator for value
-                putByte(dataPtr, (byte) 0);
-                dataPtr++;
-            }
-
-            // Write the address to the return pointer
-            putUint32(returnDataPtr, addr);
-
-            // Write the total size to the return size pointer
-            putUint32(returnDataSize, totalBytesLen);
+            copyIntoInstance(header.encode(), returnDataPtr, returnDataSize);
 
             return WasmResult.OK.getValue();
 
@@ -1539,21 +1494,21 @@ class ABI {
     /**
      * implements https://github.com/proxy-wasm/spec/tree/main/abi-versions/vNEXT#proxy_on_grpc_receive_trailing_metadata
      */
-    void proxyOnGrpcReceiveTrailingMetadata(int arg0, int arg1, int arg2) {
+    void proxyOnGrpcReceiveTrailingMetadata(int contextId, int callId, int numElements) {
         if (proxyOnGrpcReceiveTrailingMetadataFn == null) {
             return;
         }
-        proxyOnGrpcReceiveTrailingMetadataFn.apply(arg0, arg1, arg2);
+        proxyOnGrpcReceiveTrailingMetadataFn.apply(contextId, callId, numElements);
     }
 
     /**
      * implements https://github.com/proxy-wasm/spec/tree/main/abi-versions/vNEXT#proxy_on_grpc_close
      */
-    void proxyOnGrpcClose(int arg0, int arg1, int arg2) {
+    void proxyOnGrpcClose(int contextId, int callId, int statusCode) {
         if (proxyOnGrpcCloseFn == null) {
             return;
         }
-        proxyOnGrpcCloseFn.apply(arg0, arg1, arg2);
+        proxyOnGrpcCloseFn.apply(contextId, callId, statusCode);
     }
 
     // //////////////////////////////////////////////////////////////////////

@@ -26,6 +26,10 @@
       <artifactId>quarkus-vertx-http</artifactId>
     </dependency>
     <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-grpc</artifactId>
+    </dependency>
+    <dependency>
       <groupId>io.roastedroot</groupId>
       <artifactId>proxy-wasm-jaxrs</artifactId>
       <version>${project.version}</version>

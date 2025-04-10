@@ -1,0 +1,36 @@
+---
+services:
+  limitador:
+    image: quay.io/kuadrant/limitador:latest
+    command: ["limitador-server", "-vvv", "/opt/kuadrant/limits/limits.yaml"]
+    ports:
+    - "18080:8080"
+    - "18081:8081"
+    volumes:
+    - ./limits.yaml:/opt/kuadrant/limits/limits.yaml
+  quarkus:
+    image: registry.access.redhat.com/ubi8/openjdk-17
+    depends_on:
+      - limitador
+    working_dir: /app
+    command: |
+      /bin/sh -c "
+        DEBUG=true java -jar /app/quarkus-run.jar
+      "
+    ports:
+      - "28080:8080"
+    volumes:
+    - ./target/quarkus-app:/app
+  start_services:
+    image: alpine
+    depends_on:
+      - quarkus
+    command: >
+      /bin/sh -c "
+      while ! nc -z quarkus 8080;
+      do
+      echo sleeping;
+      sleep 1;
+      done;
+      echo Connected!
+      "

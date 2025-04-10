@@ -11,6 +11,7 @@ import static io.roastedroot.proxywasm.WellKnownProperties.PLUGIN_VM_ID;
 import com.dylibso.chicory.runtime.ImportMemory;
 import com.dylibso.chicory.runtime.Instance;
 import com.dylibso.chicory.wasm.WasmModule;
+import io.roastedroot.proxywasm.ArrayBytesProxyMap;
 import io.roastedroot.proxywasm.ArrayProxyMap;
 import io.roastedroot.proxywasm.ChainedHandler;
 import io.roastedroot.proxywasm.ForeignFunction;
@@ -240,6 +241,7 @@ public final class Plugin {
     byte[] pluginConfig;
     private final AtomicInteger lastCallId = new AtomicInteger(0);
     private final HashMap<Integer, Runnable> httpCalls = new HashMap<>();
+    private final HashMap<Integer, Runnable> grpcCalls = new HashMap<>();
     HashMap<String, String> upstreams = new HashMap<>();
     boolean strictUpstreams;
     int minTickPeriodMilliseconds;
@@ -457,6 +459,8 @@ public final class Plugin {
                 return id;
             } catch (InterruptedException e) {
                 throw new WasmException(WasmResult.INTERNAL_FAILURE);
+            } catch (UnsupportedOperationException e) {
+                throw new WasmException(WasmResult.UNIMPLEMENTED);
             }
         }
 
@@ -470,6 +474,125 @@ public final class Plugin {
                 throws WasmException {
             return httpCall(upstreamName, headers, body, trailers, timeoutMilliseconds);
         }
+
+        // //////////////////////////////////////////////////////////////////////
+        // GRPC calls
+        // //////////////////////////////////////////////////////////////////////
+
+        @Override
+        public int grpcCall(String upstreamName, String serviceName, String methodName, ProxyMap headers, byte[] body, int timeoutMilliseconds) throws WasmException {
+
+            var method = headers.get(METHOD);
+            if (method == null) {
+                throw new WasmException(WasmResult.BAD_ARGUMENT);
+            }
+
+            var scheme = headers.get(SCHEME);
+            if (scheme == null) {
+                scheme = "http";
+            }
+            var authority = headers.get(AUTHORITY);
+            if (authority == null) {
+                throw new WasmException(WasmResult.BAD_ARGUMENT);
+            }
+            headers.put("Host", authority);
+
+            var connectHostPort = upstreams.get(upstreamName);
+            if (connectHostPort == null && strictUpstreams) {
+                throw new WasmException(WasmResult.BAD_ARGUMENT);
+            }
+            if (connectHostPort == null) {
+                connectHostPort = authority;
+            }
+
+            URI connectUri = null;
+            try {
+                connectUri = URI.create(scheme + "://" + connectHostPort);
+            } catch (IllegalArgumentException e) {
+                throw new WasmException(WasmResult.BAD_ARGUMENT);
+            }
+
+            var connectHost = connectUri.getHost();
+            var connectPort = connectUri.getPort();
+            if (connectPort == -1) {
+                connectPort = "https".equals(scheme) ? 443 : 80;
+            }
+
+            var path = headers.get(PATH);
+            if (path == null) {
+                throw new WasmException(WasmResult.BAD_ARGUMENT);
+            }
+            if (!path.isEmpty() && !path.startsWith("/")) {
+                path = "/" + path;
+            }
+
+            URI uri = null;
+            try {
+                uri = URI.create(scheme + "://" + authority + path);
+            } catch (IllegalArgumentException e) {
+                throw new WasmException(WasmResult.BAD_ARGUMENT);
+            }
+
+            // Remove all the pseudo headers
+            for (var r : new ArrayProxyMap(headers).entries()) {
+                if (r.getKey().startsWith(":")) {
+                    headers.remove(r.getKey());
+                }
+            }
+
+            try {
+
+                var id = lastCallId.incrementAndGet();
+                var callHandler = new GrpcCallResponseHandler() {
+
+                    @Override
+                    public void onHeaders(ArrayBytesProxyMap trailerMap) {
+                        lock();
+                        try {
+                            if (httpCalls.get(id) == null) {
+                                return; // the call could have already been cancelled
+                            }
+                            wasm.sendGrpcHeaders(id, resp.headers, new ArrayProxyMap(), resp.body);
+                        } finally {
+                            unlock();
+                        }
+                    }
+
+                    @Override
+                    public void onMessage(byte[] data) {
+
+                    }
+
+                    @Override
+                    public void onTrailers(ArrayBytesProxyMap trailers) {
+
+                    }
+
+                    @Override
+                    public void onClose(int status) {
+
+                    }
+                };
+
+                var future =
+                        serverAdaptor.scheduleGrpcCall(
+                                connectHost,
+                                connectPort,
+                                serviceName,
+                                methodName,
+                                headers,
+                                body,
+                                timeoutMilliseconds,
+                                callHandler);
+                grpcCalls.put(id, future);
+                return id;
+            } catch (InterruptedException e) {
+                throw new WasmException(WasmResult.INTERNAL_FAILURE);
+            } catch (UnsupportedOperationException e) {
+                throw new WasmException(WasmResult.UNIMPLEMENTED);
+            }
+        }
+
 
         // //////////////////////////////////////////////////////////////////////
         // Metrics
